@@ -1,10 +1,7 @@
 # =====================================================
-# BRANDSHAPERS - AGENT 1 (The Brain)
-# - Listens to Slack channel #brandshapers-agent1
-# - Understands plain English questions
-# - Queries Supabase for relevant data
-# - Uses Claude AI to analyse and respond
-# - Replies back on Slack in plain English
+# BRANDSHAPERS - AGENT 1 (The Brain) v2.0
+# Fixed: Always fetches conversions with revenue data
+# Fixed: Better keyword detection
 # =====================================================
 
 import os
@@ -22,13 +19,10 @@ SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 SLACK_BOT_TOKEN     = os.environ.get("SLACK_BOT_TOKEN")
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
 
-# Slack Channels
-CHANNEL_AGENT1      = "C0BCQP0P99R"   # brandshapers-agent1
-CHANNEL_ALERTS      = "C0BCV12LJ4E"   # brandshapers-alerts
+CHANNEL_AGENT1      = "C0BCQP0P99R"
+CHANNEL_ALERTS      = "C0BCV12LJ4E"
 
 supabase: Client    = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
-
-# Track processed messages to avoid duplicates
 processed_messages  = set()
 
 
@@ -43,11 +37,7 @@ def send_slack(channel, message):
                 "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
                 "Content-Type":  "application/json"
             },
-            json={
-                "channel": channel,
-                "text":    message,
-                "mrkdwn":  True
-            },
+            json={"channel": channel, "text": message, "mrkdwn": True},
             timeout=10
         )
         return response.json().get("ok", False)
@@ -61,34 +51,23 @@ def send_slack(channel, message):
 # =====================================================
 def get_new_messages():
     try:
-        # Get messages from last 2 minutes
-        oldest = str(time.time() - 120)
+        oldest   = str(time.time() - 120)
         response = requests.get(
             "https://slack.com/api/conversations.history",
             headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-            params={
-                "channel": CHANNEL_AGENT1,
-                "oldest":  oldest,
-                "limit":   10
-            },
+            params={"channel": CHANNEL_AGENT1, "oldest": oldest, "limit": 10},
             timeout=10
         )
-        data     = response.json()
-        messages = data.get("messages", [])
-
-        # Filter out bot messages and already processed
+        messages = response.json().get("messages", [])
         new_msgs = []
         for msg in messages:
             msg_id   = msg.get("ts")
             msg_text = msg.get("text", "")
             is_bot   = msg.get("bot_id") or msg.get("subtype") == "bot_message"
-
             if not is_bot and msg_id not in processed_messages and msg_text:
                 new_msgs.append({"id": msg_id, "text": msg_text})
                 processed_messages.add(msg_id)
-
         return new_msgs
-
     except Exception as e:
         print(f"❌ Slack read error: {e}")
         return []
@@ -96,78 +75,80 @@ def get_new_messages():
 
 # =====================================================
 # DATABASE — FETCH ALL RELEVANT DATA
-# Based on the question, pull the right data
+# Always fetches conversions — that's where revenue lives
 # =====================================================
 def fetch_data_for_question(question):
-    """
-    Intelligently fetches the right data from Supabase
-    based on what the user is asking about
-    """
     question_lower = question.lower()
     data           = {}
     today          = datetime.now().strftime("%Y-%m-%d")
-    yesterday      = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     week_ago       = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     month_ago      = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
-    # Determine time range from question
-    if any(w in question_lower for w in ["today", "24 hours", "24hrs"]):
-        start_date = today
+    # Determine time range
+    if any(w in question_lower for w in ["month", "30 days", "monthly"]):
+        start_date = month_ago
+        period     = "last 30 days"
     elif any(w in question_lower for w in ["week", "7 days", "weekly"]):
         start_date = week_ago
-    elif any(w in question_lower for w in ["month", "30 days", "monthly"]):
-        start_date = month_ago
+        period     = "last 7 days"
     else:
-        start_date = yesterday  # Default: yesterday to today
+        start_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        period     = "yesterday to today"
 
-    # Always fetch campaign and publisher lookup tables
-    campaigns  = supabase.table("trackier_campaigns")\
+    data["time_range"] = f"{start_date} to {today} ({period})"
+
+    # ALWAYS fetch campaigns lookup
+    campaigns = supabase.table("trackier_campaigns")\
         .select("campaign_id, title, status, model")\
         .execute()
+    data["campaigns"] = campaigns.data
+
+    # ALWAYS fetch publishers lookup
     publishers = supabase.table("trackier_publishers")\
         .select("publisher_id, name, email, status")\
         .execute()
-
-    data["campaigns"]  = campaigns.data
     data["publishers"] = publishers.data
-    data["time_range"] = f"{start_date} to {today}"
 
-    # Fetch conversions if relevant
-    if any(w in question_lower for w in [
-        "revenue", "conversion", "earning", "payout", "money",
-        "perform", "top", "best", "worst", "bottom", "campaign",
-        "publisher", "profit", "compare", "week", "month", "today"
-    ]):
-        convs = supabase.table("trackier_conversions")\
-            .select("campaign_id, publisher_id, revenue, payout, status, created_at")\
-            .gte("created_at", start_date)\
-            .execute()
-        data["conversions"] = convs.data
+    # ALWAYS fetch conversions with revenue — this is core business data
+    convs = supabase.table("trackier_conversions")\
+        .select("campaign_id, publisher_id, goal_value, revenue, payout, status, created_at")\
+        .gte("created_at", start_date)\
+        .order("revenue", desc=True)\
+        .limit(200)\
+        .execute()
+    data["conversions"] = convs.data
+
+    # Calculate quick summary for Claude
+    total_revenue     = sum(float(c.get("revenue") or 0) for c in convs.data)
+    total_payout      = sum(float(c.get("payout") or 0) for c in convs.data)
+    total_conversions = len(convs.data)
+    campaigns_with_revenue = len([c for c in convs.data if float(c.get("revenue") or 0) > 0])
+
+    data["summary"] = {
+        "total_revenue":            total_revenue,
+        "total_payout":             total_payout,
+        "estimated_profit":         total_revenue - total_payout,
+        "total_conversion_records": total_conversions,
+        "campaigns_with_revenue":   campaigns_with_revenue
+    }
 
     # Fetch Appflyer data if relevant
     if any(w in question_lower for w in [
         "install", "click", "appflyer", "app", "impression",
-        "paybis", "novio", "stablmoney", "mobile", "android", "ios"
+        "paybis", "novio", "mobile", "android", "ios"
     ]):
         af_stats = supabase.table("appflyer_stats")\
-            .select("app_name, date, installs, clicks, impressions, revenue, media_source, campaign")\
+            .select("app_name, date, installs, clicks, impressions, revenue, media_source")\
             .gte("date", start_date)\
             .execute()
         data["appflyer_stats"] = af_stats.data
 
-        af_apps = supabase.table("appflyer_apps")\
-            .select("app_id, app_name, platform")\
-            .execute()
-        data["appflyer_apps"] = af_apps.data
-
     # Fetch sync health if relevant
-    if any(w in question_lower for w in [
-        "sync", "status", "agent", "working", "health", "last update"
-    ]):
+    if any(w in question_lower for w in ["sync", "status", "health", "working", "agent"]):
         sync = supabase.table("sync_log")\
             .select("sync_type, status, records_synced, created_at")\
             .order("created_at", desc=True)\
-            .limit(20)\
+            .limit(10)\
             .execute()
         data["sync_log"] = sync.data
 
@@ -175,42 +156,39 @@ def fetch_data_for_question(question):
 
 
 # =====================================================
-# CLAUDE AI — ANALYSE DATA AND GENERATE RESPONSE
+# CLAUDE AI — ANALYSE AND RESPOND
 # =====================================================
 def ask_claude(question, data):
-    """
-    Sends the question + data to Claude AI
-    Gets back a plain English analysis
-    """
     try:
-        # Build a rich context for Claude
         system_prompt = """You are Agent 1 — a senior data analyst for Brandshapers, 
-a digital affiliate marketing company based in Dubai. 
+a digital affiliate marketing company based in Dubai.
 
-You have access to live campaign data from Trackier (affiliate platform) 
-and Appflyer (mobile tracking). You are talking directly to Kawal, 
-the founder and Operations Head of Brandshapers.
+You have access to LIVE campaign data from Trackier (affiliate platform) 
+and Appflyer (mobile tracking). You are talking to Kawal, the founder.
 
-Your job is to:
-1. Answer his questions clearly and concisely
-2. Highlight what's working and what's not
-3. Give actionable recommendations where relevant
-4. Use Indian Rupee (₹) for currency
-5. Keep responses focused — no fluff
-6. Use Slack formatting: *bold*, bullet points with •
-7. If data is insufficient, say so honestly and explain why
+Your job:
+1. Answer questions clearly and concisely
+2. Highlight what's working and what's not  
+3. Give actionable recommendations
+4. Use ₹ for Indian Rupee amounts
+5. Use *bold* and bullet points for Slack formatting
+6. Be direct — Kawal is a busy founder
 
-You are NOT just a chatbot. You are a business intelligence analyst 
-who understands affiliate marketing deeply."""
+Important data notes:
+- conversions table contains performance records with revenue/payout
+- goal_value field contains the campaign name in performance records
+- revenue = what Brandshapers earns, payout = what publishers get
+- profit = revenue minus payout
+
+Always lead with the direct answer, then supporting data."""
 
         user_message = f"""Kawal asked: "{question}"
 
-Here is the live data from the database:
-{json.dumps(data, indent=2, default=str)[:8000]}
+Live data from database:
+{json.dumps(data, indent=2, default=str)[:10000]}
 
-Please analyse this data and answer Kawal's question clearly.
-Focus on what matters most to him as a business owner.
-Keep your response concise but complete."""
+Answer his question directly using this data.
+If revenue data exists in conversions, use it to answer revenue questions."""
 
         response = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -229,12 +207,9 @@ Keep your response concise but complete."""
         )
 
         result = response.json()
-
         if result.get("content"):
             return result["content"][0]["text"]
-        else:
-            print(f"❌ Claude error: {result}")
-            return "Sorry, I had trouble analysing that. Please try again."
+        return "Sorry, I had trouble analysing that. Please try again."
 
     except Exception as e:
         print(f"❌ Claude API error: {e}")
@@ -242,51 +217,43 @@ Keep your response concise but complete."""
 
 
 # =====================================================
-# MAIN — PROCESS A QUESTION FROM SLACK
+# PROCESS A QUESTION
 # =====================================================
 def process_question(message):
     question = message["text"]
-    print(f"\n💬 New question: {question}")
+    print(f"\n💬 Question: {question}")
 
-    # Send typing indicator
-    send_slack(CHANNEL_AGENT1, f"🤔 _Analysing your question..._")
+    send_slack(CHANNEL_AGENT1, "🤔 _Analysing your question..._")
 
-    # Fetch relevant data
-    print("   📊 Fetching data from database...")
+    print("   📊 Fetching data...")
     data = fetch_data_for_question(question)
+    print(f"   ✅ Got {len(data.get('conversions', []))} conversion records")
+    print(f"   💰 Total revenue in data: ₹{data.get('summary', {}).get('total_revenue', 0):,.0f}")
 
-    # Ask Claude to analyse
     print("   🧠 Asking Claude AI...")
     answer = ask_claude(question, data)
 
-    # Send answer back to Slack
-    final_msg = f"*🤖 Agent 1 Response:*\n\n{answer}\n\n_Data range: {data.get('time_range', 'recent')}_"
+    final_msg = f"*🤖 Agent 1:*\n\n{answer}\n\n_📅 Data: {data.get('time_range', 'recent')}_"
     send_slack(CHANNEL_AGENT1, final_msg)
-    print("   ✅ Answer sent to Slack")
+    print("   ✅ Answer sent!")
 
 
 # =====================================================
-# MAIN LOOP — POLL SLACK EVERY 10 SECONDS
+# MAIN LOOP
 # =====================================================
 def run():
-    print("🤖 Agent 1 — The Brain is LIVE")
+    print("🤖 Agent 1 v2.0 — The Brain is LIVE")
     print("👂 Listening to #brandshapers-agent1...")
-    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    # Send startup message
     send_slack(CHANNEL_AGENT1,
-        "🧠 *Agent 1 — The Brain is now LIVE*\n\n"
-        "I'm ready to answer your questions about campaign performance, "
-        "publisher stats, revenue, and more.\n\n"
-        "*Try asking me:*\n"
+        "🧠 *Agent 1 v2.0 — Ready with live revenue data!*\n\n"
+        "I now have access to your campaign performance data. Try:\n"
         "• _Which campaigns made money yesterday?_\n"
-        "• _Who are my top publishers this week?_\n"
-        "• _How many installs did we get today?_\n"
-        "• _Which campaigns should I pause?_\n\n"
-        "Just type your question here and I'll respond in seconds! 💬"
+        "• _Show me top 10 campaigns by revenue_\n"
+        "• _Who are my best publishers?_\n"
+        "• _What is my total revenue this week?_"
     )
 
-    # Poll Slack every 10 seconds for new messages
     while True:
         try:
             new_messages = get_new_messages()
@@ -294,12 +261,8 @@ def run():
                 process_question(message)
         except Exception as e:
             print(f"❌ Loop error: {e}")
-
         time.sleep(10)
 
 
-# =====================================================
-# ENTRY POINT
-# =====================================================
 if __name__ == "__main__":
     run()
