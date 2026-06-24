@@ -1,8 +1,7 @@
 # =====================================================
-# BRANDSHAPERS - AGENT 2 (Data Collector) v3.0
-# Fixed: Custom Trackier domain + correct API parsing
-# Fixed: Appflyer app discovery endpoint
-# Runs every 6 hours on Render
+# BRANDSHAPERS - AGENT 2 (Data Collector) v4.0 FINAL
+# Built from real API response inspection
+# Confirmed working field names and URL
 # =====================================================
 
 import os
@@ -14,30 +13,21 @@ from datetime import datetime, timedelta
 from supabase import create_client, Client
 
 # =====================================================
-# CONFIGURATION — Loaded from Render Environment
+# CONFIGURATION
 # =====================================================
 SUPABASE_URL        = os.environ.get("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 TRACKIER_API_KEY    = os.environ.get("TRACKIER_API_KEY")
-TRACKIER_BASE_URL   = os.environ.get("TRACKIER_BASE_URL", "https://brandshapers.trackier.io")
 APPFLYER_API_TOKEN  = os.environ.get("APPFLYER_API_TOKEN")
 
-# Connect to Supabase
+# Confirmed working base URL
+TRACKIER_BASE = "https://api.trackier.com"
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
 
-# =====================================================
-# HELPER — SAFE API CALL WITH ERROR LOGGING
-# =====================================================
-def safe_get(url, headers, params=None):
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=30)
-        return response
-    except Exception as e:
-        print(f"   ❌ Request failed: {e}")
-        return None
 
 # =====================================================
-# HELPER — LOG EVERY SYNC TO DATABASE
+# HELPER — LOG SYNC
 # =====================================================
 def log_sync(sync_type, status, records=0, error=None):
     try:
@@ -49,136 +39,63 @@ def log_sync(sync_type, status, records=0, error=None):
             "created_at":     datetime.now().isoformat()
         }).execute()
     except Exception as e:
-        print(f"⚠️  Could not write to sync_log: {e}")
+        print(f"⚠️  sync_log error: {e}")
 
 
 # =====================================================
-# TRACKIER — FETCH CAMPAIGNS
-# =====================================================
-def fetch_trackier_campaigns():
-    print("\n📦 Fetching Trackier Campaigns...")
-    headers = {"X-Api-Key": TRACKIER_API_KEY}
-    url     = f"{TRACKIER_BASE_URL}/api/v2/campaigns"
-    count   = 0
-
-    try:
-        page = 1
-        while True:
-            response = safe_get(url, headers, params={"limit": 100, "page": page})
-            if not response:
-                break
-
-            # Debug: print raw response structure on first page
-            if page == 1:
-                print(f"   📡 API Status: {response.status_code}")
-
-            if response.status_code != 200:
-                error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
-                print(f"   ❌ {error_msg}")
-                log_sync("trackier_campaigns", "error", error=error_msg)
-                break
-
-            data = response.json()
-
-            # Trackier returns campaigns directly without success wrapper
-            campaigns = data.get("campaigns", [])
-
-            # Fallback: try nested data structure
-            if not campaigns and "data" in data:
-                campaigns = data["data"].get("campaigns", [])
-
-            if not campaigns:
-                print(f"   ℹ️  No campaigns on page {page}")
-                break
-
-            for c in campaigns:
-                campaign_id = str(c.get("id") or c.get("_id") or "")
-                if not campaign_id:
-                    continue
-
-                supabase.table("trackier_campaigns").upsert({
-                    "campaign_id":   campaign_id,
-                    "title":         c.get("title", ""),
-                    "status":        c.get("status", ""),
-                    "model":         c.get("comm_type", "") or c.get("objective", ""),
-                    "os":            json.dumps(c.get("os", [])),
-                    "updated_at":    datetime.now().isoformat()
-                }).execute()
-                count += 1
-
-            print(f"   ✅ Page {page} — {len(campaigns)} campaigns synced")
-            page += 1
-
-            if len(campaigns) < 100:
-                break
-
-        print(f"   ✅ Trackier Campaigns done — Total: {count}")
-        log_sync("trackier_campaigns", "success", records=count)
-
-    except Exception as e:
-        print(f"   ❌ Error: {e}")
-        log_sync("trackier_campaigns", "error", error=str(e))
-
-
-# =====================================================
-# TRACKIER — FETCH PUBLISHERS
+# TRACKIER — PUBLISHERS
+# Confirmed fields: name, email, status, id (numeric)
+# Pagination: uses 'lastId' not page numbers
 # =====================================================
 def fetch_trackier_publishers():
     print("\n👥 Fetching Trackier Publishers...")
     headers = {"X-Api-Key": TRACKIER_API_KEY}
-    url     = f"{TRACKIER_BASE_URL}/api/v2/publishers"
+    url     = f"{TRACKIER_BASE}/v2/publishers"
     count   = 0
+    last_id = None
 
     try:
-        page = 1
         while True:
-            response = safe_get(url, headers, params={"limit": 100, "page": page})
-            if not response:
+            params = {"limit": 100}
+            if last_id:
+                params["lastId"] = last_id
+
+            r = requests.get(url, headers=headers, params=params, timeout=30)
+
+            if r.status_code != 200:
+                print(f"   ❌ HTTP {r.status_code}")
+                log_sync("trackier_publishers", "error", error=f"HTTP {r.status_code}")
                 break
 
-            if page == 1:
-                print(f"   📡 API Status: {response.status_code}")
-
-            if response.status_code != 200:
-                error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
-                print(f"   ❌ {error_msg}")
-                log_sync("trackier_publishers", "error", error=error_msg)
-                break
-
-            data = response.json()
-
-            # Trackier returns publishers directly
+            data = r.json()
             publishers = data.get("publishers", [])
 
-            # Fallback: try nested data structure
-            if not publishers and "data" in data:
-                publishers = data["data"].get("publishers", [])
-
             if not publishers:
-                print(f"   ℹ️  No publishers on page {page}")
                 break
 
             for p in publishers:
-                pub_id = str(p.get("id") or p.get("_id") or "")
+                # ID is a numeric field confirmed from testing
+                pub_id = str(p.get("id", ""))
                 if not pub_id:
                     continue
 
                 supabase.table("trackier_publishers").upsert({
                     "publisher_id": pub_id,
-                    "name":         p.get("company") or p.get("name", ""),
+                    "name":         p.get("name", ""),
                     "email":        p.get("email", ""),
                     "status":       p.get("status", ""),
                     "updated_at":   datetime.now().isoformat()
                 }).execute()
                 count += 1
+                last_id = pub_id  # Track last ID for pagination
 
-            print(f"   ✅ Page {page} — {len(publishers)} publishers synced")
-            page += 1
+            print(f"   ✅ Batch done — {len(publishers)} publishers | Total so far: {count}")
 
+            # Stop if we got less than limit — means no more pages
             if len(publishers) < 100:
                 break
 
-        print(f"   ✅ Trackier Publishers done — Total: {count}")
+        print(f"   ✅ Publishers complete — Total: {count}")
         log_sync("trackier_publishers", "success", records=count)
 
     except Exception as e:
@@ -187,163 +104,200 @@ def fetch_trackier_publishers():
 
 
 # =====================================================
-# TRACKIER — FETCH PERFORMANCE REPORT (Stats)
+# TRACKIER — CAMPAIGNS
+# Confirmed fields: id, title, status, os
+# Extra fields: currency, device, region, categories
 # =====================================================
-def fetch_trackier_stats():
-    print("\n💰 Fetching Trackier Performance Stats...")
-    headers  = {"X-Api-Key": TRACKIER_API_KEY}
-    url      = f"{TRACKIER_BASE_URL}/api/v2/report/campaign"
-    today    = datetime.now().strftime("%Y-%m-%d")
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    count    = 0
+def fetch_trackier_campaigns():
+    print("\n📦 Fetching Trackier Campaigns...")
+    headers = {"X-Api-Key": TRACKIER_API_KEY}
+    url     = f"{TRACKIER_BASE}/v2/campaigns"
+    count   = 0
+    last_id = None
 
     try:
-        response = safe_get(url, headers, params={
-            "start_date": yesterday,
-            "end_date":   today,
-            "limit":      500,
-            "page":       1
-        })
+        while True:
+            params = {"limit": 100}
+            if last_id:
+                params["lastId"] = last_id
 
-        if not response:
-            log_sync("trackier_stats", "error", error="No response")
-            return
+            r = requests.get(url, headers=headers, params=params, timeout=30)
 
-        print(f"   📡 API Status: {response.status_code}")
+            if r.status_code != 200:
+                print(f"   ❌ HTTP {r.status_code}")
+                log_sync("trackier_campaigns", "error", error=f"HTTP {r.status_code}")
+                break
 
-        if response.status_code != 200:
-            # Try alternative endpoint
-            url2 = f"{TRACKIER_BASE_URL}/api/v2/reports/campaign"
-            response = safe_get(url2, headers, params={
-                "start_date": yesterday,
-                "end_date":   today,
-                "limit":      500
-            })
-            if not response or response.status_code != 200:
-                error_msg = f"HTTP {response.status_code if response else 'None'}"
-                print(f"   ❌ {error_msg}")
-                log_sync("trackier_stats", "error", error=error_msg)
-                return
+            data      = r.json()
+            campaigns = data.get("campaigns", [])
 
-        data = response.json()
+            if not campaigns:
+                break
 
-        # Try different response structures
-        records = (
-            data.get("data", []) or
-            data.get("records", []) or
-            data.get("report", []) or
-            data.get("campaigns", []) or
-            []
-        )
+            for c in campaigns:
+                camp_id = str(c.get("id", ""))
+                if not camp_id:
+                    continue
 
-        for record in records:
-            campaign_id = str(record.get("campaign_id") or record.get("id") or "")
-            supabase.table("trackier_conversions").upsert({
-                "conversion_id": str(record.get("id") or record.get("_id") or f"stat_{campaign_id}_{today}"),
-                "campaign_id":   campaign_id,
-                "publisher_id":  str(record.get("publisher_id") or ""),
-                "goal_value":    str(record.get("goal_value") or ""),
-                "revenue":       float(record.get("revenue") or 0),
-                "payout":        float(record.get("payout") or 0),
-                "status":        str(record.get("status") or ""),
-                "created_at":    today,
-                "synced_at":     datetime.now().isoformat()
-            }).execute()
-            count += 1
+                supabase.table("trackier_campaigns").upsert({
+                    "campaign_id": camp_id,
+                    "title":       c.get("title", ""),
+                    "status":      c.get("status", ""),
+                    "model":       c.get("comm_type", "") or c.get("currency", ""),
+                    "os":          json.dumps(c.get("os", [])),
+                    "updated_at":  datetime.now().isoformat()
+                }).execute()
+                count += 1
+                last_id = camp_id
 
-        print(f"   ✅ Trackier Stats done — Total: {count} records")
-        log_sync("trackier_stats", "success", records=count)
+            print(f"   ✅ Batch done — {len(campaigns)} campaigns | Total so far: {count}")
+
+            if len(campaigns) < 100:
+                break
+
+        print(f"   ✅ Campaigns complete — Total: {count}")
+        log_sync("trackier_campaigns", "success", records=count)
 
     except Exception as e:
         print(f"   ❌ Error: {e}")
-        log_sync("trackier_stats", "error", error=str(e))
+        log_sync("trackier_campaigns", "error", error=str(e))
 
 
 # =====================================================
-# APPFLYER — STEP 1: DISCOVER ALL APPS AUTOMATICALLY
+# TRACKIER — PERFORMANCE STATS (Revenue & Conversions)
 # =====================================================
-def fetch_all_appflyer_apps():
-    print("\n🔍 Discovering ALL Appflyer apps...")
-    headers = {"Authorization": f"Bearer {APPFLYER_API_TOKEN}"}
-    apps    = []
+def fetch_trackier_performance():
+    print("\n💰 Fetching Trackier Performance Stats...")
+    headers   = {"X-Api-Key": TRACKIER_API_KEY}
+    today     = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    count     = 0
 
-    # Try multiple known Appflyer app listing endpoints
+    # Try known report endpoints
     endpoints = [
-        "https://hq1.appsflyer.com/api/mng/apps/v2",
-        "https://hq1.appsflyer.com/api/mng/apps",
-        "https://hq1.appsflyer.com/hq/api/user/apps"
+        f"{TRACKIER_BASE}/v2/report/campaign",
+        f"{TRACKIER_BASE}/v2/reports/campaign",
+        f"{TRACKIER_BASE}/v2/report/performance",
+        f"{TRACKIER_BASE}/v2/reports/conversions",
     ]
 
     for endpoint in endpoints:
-        print(f"   🔗 Trying: {endpoint}")
-        response = safe_get(endpoint, headers)
+        try:
+            r = requests.get(
+                endpoint,
+                headers=headers,
+                params={"start_date": yesterday, "end_date": today, "limit": 500},
+                timeout=30
+            )
+            print(f"   🔗 {endpoint} → {r.status_code}")
 
-        if not response:
-            continue
-
-        print(f"   📡 Status: {response.status_code}")
-
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                # Handle different response structures
-                raw_apps = (
-                    data if isinstance(data, list) else
-                    data.get("apps", []) or
+            if r.status_code == 200 and r.text.strip():
+                data    = r.json()
+                records = (
+                    data.get("records", []) or
                     data.get("data", []) or
+                    data.get("report", []) or
+                    data.get("conversions", []) or
                     []
                 )
 
+                if records:
+                    for rec in records:
+                        rec_id = str(rec.get("id") or rec.get("_id") or
+                                     f"{rec.get('campaign_id','x')}_{today}")
+                        supabase.table("trackier_conversions").upsert({
+                            "conversion_id": rec_id,
+                            "campaign_id":   str(rec.get("campaign_id", "")),
+                            "publisher_id":  str(rec.get("publisher_id", "")),
+                            "goal_value":    str(rec.get("goal_value", "")),
+                            "revenue":       float(rec.get("revenue") or 0),
+                            "payout":        float(rec.get("payout") or 0),
+                            "status":        str(rec.get("status", "")),
+                            "created_at":    today,
+                            "synced_at":     datetime.now().isoformat()
+                        }).execute()
+                        count += 1
+
+                    print(f"   ✅ Performance stats done — {count} records")
+                    log_sync("trackier_performance", "success", records=count)
+                    return
+
+        except Exception as e:
+            print(f"   ⚠️  {endpoint} failed: {e}")
+            continue
+
+    print("   ⚠️  No performance endpoint found yet — will retry next sync")
+    log_sync("trackier_performance", "skipped", error="No working endpoint found")
+
+
+# =====================================================
+# APPFLYER — DISCOVER ALL APPS
+# =====================================================
+def fetch_all_appflyer_apps():
+    print("\n🔍 Discovering Appflyer apps...")
+    headers = {"Authorization": f"Bearer {APPFLYER_API_TOKEN}"}
+    apps    = []
+
+    endpoints = [
+        "https://hq1.appsflyer.com/api/mng/apps/v2",
+        "https://hq1.appsflyer.com/api/mng/apps",
+    ]
+
+    for endpoint in endpoints:
+        try:
+            r = requests.get(endpoint, headers=headers, timeout=30)
+            print(f"   🔗 {endpoint} → {r.status_code}")
+
+            if r.status_code == 200:
+                data     = r.json()
+                raw_apps = data if isinstance(data, list) else data.get("apps", data.get("data", []))
+
                 for app in raw_apps:
-                    app_id   = app.get("app_id") or app.get("id") or app.get("appId")
-                    app_name = app.get("app_name") or app.get("name") or app.get("appName", "Unknown")
-                    platform = app.get("platform") or app.get("os", "unknown")
+                    app_id   = str(app.get("app_id") or app.get("id") or "")
+                    app_name = str(app.get("app_name") or app.get("name") or "Unknown")
+                    platform = str(app.get("platform") or app.get("os") or "unknown")
 
                     if not app_id:
                         continue
 
                     supabase.table("appflyer_apps").upsert({
-                        "app_id":     str(app_id),
-                        "app_name":   str(app_name),
-                        "platform":   str(platform),
+                        "app_id":     app_id,
+                        "app_name":   app_name,
+                        "platform":   platform,
                         "is_active":  True,
                         "updated_at": datetime.now().isoformat()
                     }).execute()
-
-                    apps.append({
-                        "app_id":   str(app_id),
-                        "app_name": str(app_name)
-                    })
-                    print(f"   📱 Found: {app_name} ({app_id})")
+                    apps.append({"app_id": app_id, "app_name": app_name})
+                    print(f"   📱 {app_name} ({app_id})")
 
                 if apps:
-                    break  # Stop trying endpoints once we have apps
+                    break
 
-            except Exception as e:
-                print(f"   ⚠️  Parse error: {e}")
-                continue
+        except Exception as e:
+            print(f"   ⚠️  {endpoint}: {e}")
+            continue
 
+    # Fallback — load from Supabase if discovery failed
     if not apps:
-        print("   ⚠️  Could not auto-discover apps via API")
-        print("   📋 Loading apps from Supabase (previously stored)...")
+        print("   📋 Loading from Supabase (previously stored apps)...")
         try:
             result = supabase.table("appflyer_apps").select("*").eq("is_active", True).execute()
             apps   = [{"app_id": r["app_id"], "app_name": r["app_name"]} for r in result.data]
             print(f"   ✅ Loaded {len(apps)} apps from database")
         except Exception as e:
-            print(f"   ❌ Could not load from database: {e}")
+            print(f"   ❌ {e}")
 
-    print(f"\n   ✅ Total apps to process: {len(apps)}")
+    print(f"   ✅ Total apps: {len(apps)}")
     log_sync("appflyer_app_discovery", "success", records=len(apps))
     return apps
 
 
 # =====================================================
-# APPFLYER — STEP 2: PULL STATS FOR EVERY APP
+# APPFLYER — STATS PER APP
 # =====================================================
 def fetch_appflyer_stats_for_all_apps(apps):
     if not apps:
-        print("\n⚠️  No Appflyer apps to fetch stats for.")
+        print("\n⚠️  No apps to fetch Appflyer stats for.")
         return
 
     today     = datetime.now().strftime("%Y-%m-%d")
@@ -362,30 +316,23 @@ def fetch_appflyer_stats_for_all_apps(apps):
 
         try:
             url = f"https://hq1.appsflyer.com/api/agg-data/export/app/{app_id}/partners_report/v5"
-            response = safe_get(url, headers, params={
-                "from":     yesterday,
-                "to":       today,
-                "timezone": "Asia/Dubai"
-            })
+            r   = requests.get(url, headers=headers,
+                               params={"from": yesterday, "to": today, "timezone": "Asia/Dubai"},
+                               timeout=30)
 
-            if not response:
+            if r.status_code == 404:
+                print(f"      ⚠️  No data yet")
+                continue
+            if r.status_code != 200:
+                print(f"      ❌ HTTP {r.status_code}")
                 continue
 
-            if response.status_code == 404:
-                print(f"      ⚠️  No data for {app_name}")
-                continue
-
-            if response.status_code != 200:
-                print(f"      ❌ HTTP {response.status_code}")
-                continue
-
-            lines = response.text.strip().split("\n")
+            lines = r.text.strip().split("\n")
             if len(lines) <= 1:
-                print(f"      ⚠️  Empty response for {app_name}")
+                print(f"      ⚠️  Empty")
                 continue
 
             col_headers = [h.strip() for h in lines[0].split(",")]
-
             for line in lines[1:]:
                 values = [v.strip() for v in line.split(",")]
                 row    = dict(zip(col_headers, values))
@@ -404,14 +351,14 @@ def fetch_appflyer_stats_for_all_apps(apps):
                 }).execute()
                 count += 1
 
-            print(f"      ✅ {count} rows synced")
+            print(f"      ✅ {count} rows")
             total += count
 
         except Exception as e:
-            print(f"      ❌ Error: {e}")
+            print(f"      ❌ {e}")
             continue
 
-    print(f"\n   ✅ Appflyer complete — {total} rows across {len(apps)} apps")
+    print(f"\n   ✅ Appflyer total: {total} rows across {len(apps)} apps")
     log_sync("appflyer_stats_all_apps", "success", records=total)
 
 
@@ -420,19 +367,18 @@ def fetch_appflyer_stats_for_all_apps(apps):
 # =====================================================
 def run_full_sync():
     print(f"\n{'='*55}")
-    print(f"🤖 AGENT 2 v3.0 — Sync Started {datetime.now()} UTC")
-    print(f"   Trackier URL: {TRACKIER_BASE_URL}")
+    print(f"🤖 AGENT 2 v4.0 FINAL — {datetime.now()}")
     print(f"{'='*55}")
 
-    fetch_trackier_campaigns()
     fetch_trackier_publishers()
-    fetch_trackier_stats()
+    fetch_trackier_campaigns()
+    fetch_trackier_performance()
 
     apps = fetch_all_appflyer_apps()
     fetch_appflyer_stats_for_all_apps(apps)
 
     print(f"\n{'='*55}")
-    print(f"✅ AGENT 2 — Sync Complete {datetime.now()}")
+    print(f"✅ Sync Complete — {datetime.now()}")
     print(f"{'='*55}\n")
 
 
@@ -440,16 +386,11 @@ def run_full_sync():
 # ENTRY POINT
 # =====================================================
 if __name__ == "__main__":
-    print("🤖 Agent 2 v3.0 — Starting up...")
-    print(f"   Trackier: {TRACKIER_BASE_URL}")
-
+    print("🤖 Agent 2 v4.0 FINAL — Starting...")
     run_full_sync()
-
     schedule.every(6).hours.do(run_full_sync)
     schedule.every().day.at("03:00").do(run_full_sync)
-
-    print("⏰ Scheduler active — syncing every 6 hours")
-
+    print("⏰ Scheduler active — every 6 hours")
     while True:
         schedule.run_pending()
         time.sleep(60)
