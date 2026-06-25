@@ -1,83 +1,61 @@
-# Fix script for Agent 1 — patches the fetch function
-import re
+# Fix: Better date handling + campaign filtering for Agent 1
+content = open("agent1.py").read()
 
-content = open('agent1.py').read()
+old = '''def fetch_data(question):
+    q     = question.lower()
+    today = now_ist().strftime("%Y-%m-%d")
+    days  = 30 if "month" in q else 7 if "week" in q else 2
+    start = (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d")'''
 
-# New fetch function that properly enriches and groups data
-new_fetch = '''def fetch_data_for_question(question):
-    question_lower = question.lower()
-    data           = {}
-    today          = datetime.now().strftime("%Y-%m-%d")
-    week_ago       = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    month_ago      = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+new = '''def fetch_data(question):
+    q     = question.lower()
+    today = now_ist().strftime("%Y-%m-%d")
+    yest  = (now_ist() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    if any(w in question_lower for w in ["month", "30 days", "monthly"]):
-        start_date = month_ago
-        period     = "last 30 days"
-    elif any(w in question_lower for w in ["week", "7 days", "weekly"]):
-        start_date = week_ago
-        period     = "last 7 days"
+    # Precise date detection
+    if "today" in q:
+        start = today
+    elif "yesterday" in q:
+        start = yest
+    elif "month" in q or "30 days" in q:
+        start = (now_ist() - timedelta(days=30)).strftime("%Y-%m-%d")
+    elif "week" in q or "7 days" in q:
+        start = (now_ist() - timedelta(days=7)).strftime("%Y-%m-%d")
     else:
-        start_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
-        period     = "last 2 days"
+        start = yest  # Default: yesterday to today'''
 
-    data["time_range"] = f"{start_date} to {today} ({period})"
-
-    # Fetch campaigns and publishers for lookup
-    camps = supabase.table("trackier_campaigns").select("campaign_id, title, status").execute()
-    pubs  = supabase.table("trackier_publishers").select("publisher_id, name, email").execute()
-    data["publishers"] = pubs.data
-
-    # Fetch ALL conversions with revenue
-    convs = supabase.table("trackier_conversions")\
-        .select("campaign_id, publisher_id, goal_value, revenue, payout, status, created_at")\
-        .gte("created_at", start_date)\
-        .order("revenue", desc=True)\
-        .limit(500)\
-        .execute()
-
-    # Build campaign name lookup
-    camp_lookup = {c["campaign_id"]: c["title"] for c in camps.data}
-
-    # Group and enrich by campaign name
-    by_camp = {}
-    for c in convs.data:
-        cid  = c.get("campaign_id", "")
-        name = camp_lookup.get(cid) or c.get("goal_value") or f"Campaign {cid}"
-        rev  = float(c.get("revenue") or 0)
-        pay  = float(c.get("payout") or 0)
-        if name not in by_camp:
-            by_camp[name] = {"revenue": 0, "payout": 0, "profit": 0, "conversions": 0}
-        by_camp[name]["revenue"]     += rev
-        by_camp[name]["payout"]      += pay
-        by_camp[name]["profit"]      += rev - pay
-        by_camp[name]["conversions"] += 1
-
-    top = sorted(by_camp.items(), key=lambda x: x[1]["revenue"], reverse=True)
-    total_rev = sum(v["revenue"] for v in by_camp.values())
-    total_pay = sum(v["payout"] for v in by_camp.values())
-
-    data["top_campaigns"] = [{"name": k, **v} for k, v in top[:20]]
-    data["summary"] = {
-        "total_revenue": total_rev,
-        "total_payout":  total_pay,
-        "total_profit":  total_rev - total_pay,
-        "total_records": len(convs.data),
-        "with_revenue":  len([c for c in convs.data if float(c.get("revenue") or 0) > 0])
-    }
-
-    # Appflyer if relevant
-    if any(w in question_lower for w in ["install", "click", "app", "appflyer", "paybis", "novio"]):
-        af = supabase.table("appflyer_stats").select("*").gte("date", start_date).execute()
-        data["appflyer"] = af.data
-
-    return data'''
-
-# Replace the entire fetch function
-pattern = r'def fetch_data_for_question\(question\):.*?(?=\ndef )'
-if re.search(pattern, content, re.DOTALL):
-    content = re.sub(pattern, new_fetch + '\n\n', content, flags=re.DOTALL)
-    open('agent1.py', 'w').write(content)
-    print("SUCCESS — fetch function patched perfectly")
+if old in content:
+    content = content.replace(old, new)
+    open("agent1.py", "w").write(content)
+    print("SUCCESS — Date fix applied")
 else:
-    print("ERROR — pattern not found")
+    print("Pattern not found — trying alternative")
+
+# Also fix campaign filtering in ask_claude system prompt
+old2 = '''                "system": """You are Agent 1, senior data analyst for Brandshapers Dubai affiliate company.
+Talk to Kawal the founder. Be direct. Use rupee symbol.
+Use *bold* and bullets for Slack. Data has top_campaigns with revenue/payout/profit.
+All dates and times are in IST (India Standard Time).
+ALWAYS give actual numbers from top_campaigns.""",'''
+
+new2 = '''                "system": """You are Agent 1, senior data analyst for Brandshapers Dubai affiliate company.
+Talk to the user directly. Be direct. Use rupee symbol (₹).
+Use *bold* and bullets for Slack formatting.
+All dates and times are in IST (India Standard Time).
+
+CRITICAL RULES:
+1. If question mentions a specific campaign name — filter top_campaigns to show ONLY that campaign
+2. If question says "today" — only show data with today\'s date
+3. If question says "yesterday" — only show yesterday\'s data
+4. ALWAYS show the exact date range you are reporting on
+5. ALWAYS give actual numbers from the data
+6. If campaign not found, say so clearly""",'''
+
+if old2 in content:
+    content = content.replace(old2, new2)
+    open("agent1.py", "w").write(content)
+    print("SUCCESS — Claude prompt fix applied")
+else:
+    print("Prompt pattern not found")
+
+print("Done")
