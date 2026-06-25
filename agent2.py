@@ -130,10 +130,11 @@ def fetch_trackier_performance():
     yest    = yesterday_ist()
     count   = 0
     try:
+        # Sync both today AND yesterday on every run
         page = 1
         while True:
             r = requests.get(url, headers=headers,
-                params={"start_date": yest, "end_date": today, "limit": 500, "page": page},
+                params={"start_date": today, "end_date": today, "limit": 500, "page": page},
                 timeout=30)
             if r.status_code != 200:
                 break
@@ -263,7 +264,7 @@ def run_full_sync():
 if __name__ == "__main__":
     print("🤖 Agent 2 v5.0 IST — Starting...")
     run_full_sync()
-    schedule.every(6).hours.do(run_full_sync)
+    schedule.every(1).hours.do(run_full_sync)
     schedule.every().day.at("00:30").do(run_full_sync)  # 6 AM IST
     print("⏰ Scheduler active — every 6 hours IST")
     while True:
