@@ -152,6 +152,8 @@ def fetch_trackier_performance():
                     "goal_value":    rec.get("campaign_name", ""),
                     "revenue":       float(rec.get("revenue") or 0),
                     "payout":        float(rec.get("payout") or 0),
+                "conversions":   int(rec.get("approvedConversions") or 0),
+                "clicks":        int(rec.get("clicks") or 0),
                     "status":        "approved",
                     "created_at":    today,
                     "synced_at":     now_ist().isoformat()
