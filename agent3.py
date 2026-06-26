@@ -132,10 +132,13 @@ def check_anomalies():
     try:
         yest   = yesterday_ist()
         convs  = supabase.table("trackier_conversions").select("campaign_id").gte("created_at", yest).execute()
+        week_ago = (now_ist - timedelta(days=7)).strftime("%Y-%m-%d")
+        convs7 = supabase.table("trackier_conversions").select("campaign_id").gte("created_at", week_ago).execute()
         camps  = supabase.table("trackier_campaigns").select("campaign_id, title").eq("status", "active").execute()
         active = {c["campaign_id"]: c["title"] for c in camps.data}
         recent = {c["campaign_id"] for c in convs.data}
-        silent = [(cid, title) for cid, title in active.items() if cid not in recent]
+        active7 = {c["campaign_id"] for c in convs7.data}
+        silent = [(cid, title) for cid, title in active.items() if cid not in recent and cid in active7]
         if silent:
             titles = [t for _, t in silent[:5]]
             alerts.append(
