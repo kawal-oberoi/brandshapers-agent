@@ -45,17 +45,19 @@ def send_slack(channel, message):
 
 def get_summary():
     yest = yesterday_ist()
-    r    = supabase.table("trackier_conversions").select("revenue, payout, status").gte("created_at", yest).execute()
+    today = now_ist().strftime("%Y-%m-%d")
+    r    = supabase.table("trackier_conversions").select("revenue, payout, status, conversions").gte("created_at", yest).lt("created_at", today).execute()
     total_rev  = sum(float(c.get("revenue") or 0) for c in r.data)
     total_pay  = sum(float(c.get("payout") or 0) for c in r.data)
-    total_conv = len(r.data)
+    total_conv = sum(int(c.get("conversions") or 0) for c in r.data)
     approved   = sum(1 for c in r.data if c.get("status") == "approved")
     return {"total_revenue": total_rev, "total_payout": total_pay,
             "profit": total_rev - total_pay, "total_conversions": total_conv, "approved": approved}
 
 def get_top_campaigns():
     yest  = yesterday_ist()
-    convs = supabase.table("trackier_conversions").select("campaign_id, goal_value, revenue, payout").gte("created_at", yest).execute()
+    today = now_ist().strftime("%Y-%m-%d")
+    convs = supabase.table("trackier_conversions").select("campaign_id, goal_value, revenue, payout, conversions").gte("created_at", yest).lt("created_at", today).execute()
     camps = supabase.table("trackier_campaigns").select("campaign_id, title").execute()
     camp_lookup = {c["campaign_id"]: c["title"] for c in camps.data}
     by_camp = {}
@@ -66,7 +68,7 @@ def get_top_campaigns():
         if name not in by_camp:
             by_camp[name] = {"revenue": 0, "conversions": 0}
         by_camp[name]["revenue"]     += rev
-        by_camp[name]["conversions"] += 1
+        by_camp[name]["conversions"] += int(c.get("conversions") or 0)
     return sorted(by_camp.items(), key=lambda x: x[1]["revenue"], reverse=True)
 
 def get_appflyer_summary():
@@ -142,7 +144,7 @@ def check_anomalies():
         if silent:
             titles = [t for _, t in silent[:5]]
             alerts.append(
-                f"🔴 *Campaigns with zero conversions in last 24hrs IST*\n" +
+                f"🔴 *Campaigns active last 7 days with zero conversions yesterday*\n" +
                 "\n".join([f"   • {t}" for t in titles]) +
                 (f"\n   _...and {len(silent)-5} more_" if len(silent) > 5 else "")
             )
