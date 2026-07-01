@@ -1,6 +1,8 @@
 # =====================================================
-# BRANDSHAPERS - AGENT 1 (The Brain) v3.0
+# BRANDSHAPERS - AGENT 1 (The Brain) v3.1
 # Fixed: IST timezone throughout
+# Fixed: "today" keyword now properly detected (was defaulting to 2-day range)
+# Fixed: conversions now summed from actual `conversions` field (was counting rows)
 # =====================================================
 
 import os, json, time, requests
@@ -56,29 +58,47 @@ def get_new_messages():
 def fetch_data(question):
     q     = question.lower()
     today = now_ist().strftime("%Y-%m-%d")
-    days  = 30 if "month" in q else 7 if "week" in q else 2
+
+    # FIX: "today" keyword was missing entirely before — it fell through to the
+    # default `days = 2`, which pulled in yesterday's (and the day before's) data
+    # and presented it as "today". Now explicitly handled with days = 0.
+    if "today" in q:
+        days = 0
+    elif "month" in q:
+        days = 30
+    elif "week" in q:
+        days = 7
+    else:
+        days = 2
+
     start = (now_ist() - timedelta(days=days)).strftime("%Y-%m-%d")
 
     camps = supabase.table("trackier_campaigns").select("campaign_id, title, status").execute()
     pubs  = supabase.table("trackier_publishers").select("publisher_id, name, email, status").execute()
     camp_lookup = {c["campaign_id"]: c["title"] for c in camps.data}
 
+    # FIX: added `conversions` to the select — it was never being fetched, so the
+    # code below had no choice but to count rows instead of actual approved conversions.
     convs = supabase.table("trackier_conversions")\
-        .select("campaign_id, publisher_id, goal_value, revenue, payout, status, created_at")\
+        .select("campaign_id, publisher_id, goal_value, revenue, payout, conversions, status, created_at")\
         .gte("created_at", start).order("revenue", desc=True).limit(500).execute()
 
     by_camp = {}
     for c in convs.data:
-        cid  = c.get("campaign_id", "")
-        name = camp_lookup.get(cid) or c.get("goal_value") or f"Campaign {cid}"
-        rev  = float(c.get("revenue") or 0)
-        pay  = float(c.get("payout") or 0)
+        cid        = c.get("campaign_id", "")
+        name       = camp_lookup.get(cid) or c.get("goal_value") or f"Campaign {cid}"
+        rev        = float(c.get("revenue") or 0)
+        pay        = float(c.get("payout") or 0)
+        # FIX: sum the actual `conversions` field from Trackier, not `+= 1` per row.
+        # Previously this counted "number of matching rows" as the conversion count,
+        # which silently diverged from the real approved-conversions number.
+        conv_count = int(c.get("conversions") or 0)
         if name not in by_camp:
             by_camp[name] = {"revenue": 0, "payout": 0, "profit": 0, "conversions": 0}
         by_camp[name]["revenue"]     += rev
         by_camp[name]["payout"]      += pay
         by_camp[name]["profit"]      += rev - pay
-        by_camp[name]["conversions"] += 1
+        by_camp[name]["conversions"] += conv_count
 
     top       = sorted(by_camp.items(), key=lambda x: x[1]["revenue"], reverse=True)
     total_rev = sum(v["revenue"] for v in by_camp.values())
@@ -86,13 +106,14 @@ def fetch_data(question):
 
     by_pub = {}
     for c in convs.data:
-        pid   = c.get("publisher_id", "")
-        pname = next((p["name"] for p in pubs.data if p["publisher_id"] == pid), f"Publisher {pid}")
-        rev   = float(c.get("revenue") or 0)
+        pid        = c.get("publisher_id", "")
+        pname      = next((p["name"] for p in pubs.data if p["publisher_id"] == pid), f"Publisher {pid}")
+        rev        = float(c.get("revenue") or 0)
+        conv_count = int(c.get("conversions") or 0)  # FIX: same row-count bug fixed here too
         if pname not in by_pub:
             by_pub[pname] = {"revenue": 0, "conversions": 0}
         by_pub[pname]["revenue"]     += rev
-        by_pub[pname]["conversions"] += 1
+        by_pub[pname]["conversions"] += conv_count
     top_pubs = sorted(by_pub.items(), key=lambda x: x[1]["revenue"], reverse=True)
 
     af_data = []
@@ -142,9 +163,9 @@ def process(msg):
     print("   ✅ Sent!")
 
 def run():
-    print("🤖 Agent 1 v3.0 IST — LIVE")
+    print("🤖 Agent 1 v3.1 IST — LIVE")
     send_slack(CHANNEL_AGENT1,
-        "🧠 *Agent 1 v3.0 — Now with IST timezone!*\n\n"
+        "🧠 *Agent 1 v3.1 — 'today' fix + accurate conversion counts!*\n\n"
         "All data and dates are now in India Standard Time (IST) ✅\n"
         "Ask me anything about your campaigns!"
     )
