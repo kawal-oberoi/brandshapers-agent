@@ -1,7 +1,8 @@
 # =====================================================
-# BRANDSHAPERS - AGENT 2 (Data Collector) v5.1
+# BRANDSHAPERS - AGENT 2 (Data Collector) v5.2
 # Fixed: IST timezone (Asia/Kolkata) throughout
 # Fixed: Use APPROVED-only revenue/payout figures
+# Fixed: Infinite loop protection in campaigns pagination
 # =====================================================
 
 import os
@@ -50,6 +51,7 @@ def fetch_trackier_publishers():
     url     = f"{TRACKIER_BASE}/v2/publishers"
     count   = 0
     last_id = None
+    seen_ids = set()
     try:
         while True:
             params = {"limit": 100}
@@ -63,10 +65,17 @@ def fetch_trackier_publishers():
             publishers = data.get("publishers", [])
             if not publishers:
                 break
+
+            batch_ids = [str(p.get("id", "")) for p in publishers]
+            if batch_ids and all(pid in seen_ids for pid in batch_ids):
+                print("   ⚠️ Repeated batch detected — stopping to avoid infinite loop")
+                break
+
             for p in publishers:
                 pub_id = str(p.get("id", ""))
                 if not pub_id:
                     continue
+                seen_ids.add(pub_id)
                 supabase.table("trackier_publishers").upsert({
                     "publisher_id": pub_id,
                     "name":         p.get("name", ""),
@@ -79,6 +88,9 @@ def fetch_trackier_publishers():
             print(f"   ✅ Batch — {len(publishers)} publishers | Total: {count}")
             if len(publishers) < 100:
                 break
+            if count > 5000:
+                print("   ⚠️ Safety cap reached — stopping")
+                break
         log_sync("trackier_publishers", "success", records=count)
     except Exception as e:
         log_sync("trackier_publishers", "error", error=str(e))
@@ -89,6 +101,7 @@ def fetch_trackier_campaigns():
     url     = f"{TRACKIER_BASE}/v2/campaigns"
     count   = 0
     last_id = None
+    seen_ids = set()
     try:
         while True:
             params = {"limit": 100}
@@ -102,10 +115,18 @@ def fetch_trackier_campaigns():
             campaigns = data.get("campaigns", [])
             if not campaigns:
                 break
+
+            # Safety: detect repeated batch (pagination not advancing)
+            batch_ids = [str(c.get("id", "")) for c in campaigns]
+            if batch_ids and all(cid in seen_ids for cid in batch_ids):
+                print("   ⚠️ Repeated batch detected — stopping to avoid infinite loop")
+                break
+
             for c in campaigns:
                 camp_id = str(c.get("id", ""))
                 if not camp_id:
                     continue
+                seen_ids.add(camp_id)
                 supabase.table("trackier_campaigns").upsert({
                     "campaign_id": camp_id,
                     "title":       c.get("title", ""),
@@ -118,6 +139,9 @@ def fetch_trackier_campaigns():
                 last_id  = camp_id
             print(f"   ✅ Batch — {len(campaigns)} campaigns | Total: {count}")
             if len(campaigns) < 100:
+                break
+            if count > 5000:
+                print("   ⚠️ Safety cap reached — stopping")
                 break
         log_sync("trackier_campaigns", "success", records=count)
     except Exception as e:
@@ -177,6 +201,9 @@ def fetch_trackier_performance():
             print(f"   ✅ Page {page} — {len(records)} records")
             page += 1
             if len(records) < 500:
+                break
+            if page > 50:
+                print("   ⚠️ Safety cap reached — stopping")
                 break
         print(f"   ✅ Performance done — Total: {count}")
         log_sync("trackier_performance", "success", records=count)
@@ -269,7 +296,7 @@ def fetch_appflyer_stats(apps):
 
 def run_full_sync():
     print(f"\n{'='*55}")
-    print(f"🤖 AGENT 2 v5.1 IST — {now_ist().strftime('%d %b %Y %I:%M %p IST')}")
+    print(f"🤖 AGENT 2 v5.2 IST — {now_ist().strftime('%d %b %Y %I:%M %p IST')}")
     print(f"{'='*55}")
     fetch_trackier_publishers()
     fetch_trackier_campaigns()
@@ -279,7 +306,7 @@ def run_full_sync():
     print(f"\n✅ Sync Complete — {now_ist().strftime('%d %b %Y %I:%M %p IST')}")
 
 if __name__ == "__main__":
-    print("🤖 Agent 2 v5.1 IST — Starting...")
+    print("🤖 Agent 2 v5.2 IST — Starting...")
     run_full_sync()
     schedule.every(1).hours.do(run_full_sync)
     schedule.every().day.at("00:30").do(run_full_sync)  # 6 AM IST
